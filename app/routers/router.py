@@ -1,5 +1,6 @@
 """Dual router — S1 + Coordinator (multi-agent Phase 8)."""
 
+import re
 import time
 
 from app.agents.schemas import AgentResponse, ChatResponse
@@ -19,6 +20,16 @@ from app.agents.conversation_manager import (
 )
 
 S1_CONFIDENCE_THRESHOLD = 0.70
+
+
+def _clear_scheduling_state(belief: ConversationBeliefState) -> None:
+    """Clear scheduling state after completion or escape."""
+    belief.scheduling_name = ""
+    belief.scheduling_phone = ""
+    belief.scheduling_day = ""
+    belief.scheduling_time = ""
+    belief.scheduling_loop_count = 0
+    belief.active_intents.discard("scheduling")
 
 
 def _extract_property_data(belief, result_text: str) -> None:
@@ -52,11 +63,13 @@ async def _try_pre_llm_shortcut(
     if "resolved_by_description" in (belief.active_intents or set()) and belief.selected_property_id:
         # Check if user is asking for something DIFFERENT (new criteria)
         msg_lower = message.lower().strip()
-        new_search_kw = ["busca", "buscando", "tienen", "alguno", "otro", "otra", 
+        new_search_kw = ["busca", "buscando", "estoy buscando", "tienen", "alguno", "algun", "otro", "otra", 
                          "diferente", "2 ambientes", "3 dormitorios", "habitacion",
-                         "1 habitacion", "1 dormitorio", "2 dormitorios"]
+                         "1 habitacion", "1 dormitorio", "2 dormitorios", "de 1", "de 2"]
         if any(kw in msg_lower for kw in new_search_kw):
             belief.active_intents.discard("resolved_by_description")
+            belief.selected_property_id = None  # Prevent re-resolution
+            belief.last_search_context = ""     # Clear context so state_transitioner can't re-match
             return None  # Let LLM handle the new search
         
         pid = belief.selected_property_id
@@ -96,22 +109,46 @@ async def _try_pre_llm_shortcut(
     
     # Case 1c: Scheduling in progress — accumulate data from message
     if "scheduling" in (belief.active_intents or set()):
-        # Try to extract scheduling data directly
         msg_lower = message.lower().strip()
+        
+        # Don't intercept if this is the very first scheduling turn and no property selected yet.
+        # Let the LLM run first to resolve property references.
+        first_scheduling = not belief.selected_property_id and not belief.scheduling_name and not belief.scheduling_day and not belief.scheduling_time and belief.scheduling_loop_count == 0
+        if first_scheduling:
+            return None  # Let LLM handle first scheduling message
+        
+        # ── Loop count: increment BEFORE field extraction so Q&A sees updated count
+        if belief.last_tool_called == "schedule_visit":
+            belief.scheduling_loop_count += 1
+        else:
+            belief.scheduling_loop_count = 0
         
         # Auto-fill phone from request (WhatsApp webhook provides it)
         if phone and not belief.scheduling_phone:
             belief.scheduling_phone = phone
         
-        # Detect property ID
-        id_m = re.search(r"\b(\d+)\b", msg_lower)
+        # Detect property ID — also from "id N" patterns
+        id_m = re.search(r"\b(?:id\s*#?\s*)?(\d+)\b", msg_lower)
         if id_m and not belief.selected_property_id:
-            belief.selected_property_id = int(id_m.group(1))
+            pid = int(id_m.group(1))
+            if 1 <= pid <= 100:  # Sanity check: avoid capturing years/dates as IDs
+                belief.selected_property_id = pid
         
-        # Detect name (simple heuristic: 2+ words that look like a name)
+        # Detect name — standard pattern with prefix
         name_m = re.search(r"\b(?:me llamo|mi nombre es|soy)\s+(.+?)(?:\s*(?:y|,|\.|$|puedo|quiero|mañana|tarde|\d))", msg_lower)
         if name_m and not belief.scheduling_name:
             belief.scheduling_name = name_m.group(1).strip().title()
+        
+        # Q&A name capture: if scheduling in progress and user replied with short text
+        # that doesn't look like a question, property ID, or number
+        if not belief.scheduling_name and belief.scheduling_loop_count >= 1:
+            # Exclude messages that are property ID references
+            looks_like_id = re.match(r"^\s*(?:id|nro|número|nº|numero|el|la|propiedad|#)?\s*\d+\s*$", msg_lower)
+            not_a_question = not re.search(r"\b(busco|quiero|necesito|buscando|me interesa|agendar|visita|fotos|detalles|precio|cuanto|donde)\b", msg_lower)
+            short_reply = len(msg_lower.split()) <= 3
+            not_just_number = not re.match(r"^\d+$", msg_lower)
+            if not looks_like_id and not_a_question and short_reply and not_just_number:
+                belief.scheduling_name = message.strip().title()
         
         # Detect day
         day_m = re.search(r"\b(lunes|martes|mi[eé]rcoles|jueves|viernes|s[aá]bado|domingo|ma[nñ]ana|pasado)\b", msg_lower)
@@ -123,39 +160,80 @@ async def _try_pre_llm_shortcut(
         if time_m and not belief.scheduling_time:
             t = time_m.group(1).strip()
             if t == "atarde": t = "tarde"
-            # Don't capture "mañana" as time if already captured as day
-            if t == "mañana" and belief.scheduling_day == "mañana":
-                t = ""
+            if t in ("mañana", "mañana") and belief.scheduling_day in ("mañana", "mañana"):
+                rest = msg_lower[time_m.end():]
+                time2 = re.search(r"\b(tarde|noche|atarde|\d{1,2}[:h]\d{2})\b", rest)
+                if time2:
+                    t = time2.group(1).strip()
+                    if t == "atarde": t = "tarde"
+                else:
+                    t = ""
             if t:
                 belief.scheduling_time = t
         
-        # Show progress and ask for missing
+        # Show progress and ask for missing — natural language
         missing = []
         if not belief.selected_property_id:
             missing.append("el ID de la propiedad")
         if not belief.scheduling_name:
-            missing.append("tu nombre completo")
+            missing.append("nombre")
         if not belief.scheduling_day:
-            missing.append("el día que preferís")
+            missing.append("día")
         if not belief.scheduling_time:
-            missing.append("el horario")
-        # Phone is auto-provided — only ask if not available
+            missing.append("horario")
         if not belief.scheduling_phone and not phone:
-            missing.append("tu teléfono")
+            missing.append("teléfono")
+        
+        # Check if user is asking something unrelated to scheduling
+        other_topics = re.search(
+            r"\b(busco|quiero|necesito|buscando|me interesa|mostrame|pasame|listas?|propiedades|de nuevo|otra vez|buscar|volver)\b",
+            msg_lower
+        )
+        if other_topics and belief.scheduling_loop_count >= 2:
+            # User wants to change topic — exit scheduling gracefully
+            _clear_scheduling_state(belief)
+            return None  # Let LLM handle the new request
+        
+        # ── Infinite loop detection ────────────────────────────
+        if belief.scheduling_loop_count >= 5:
+            _clear_scheduling_state(belief)
+            return (
+                ChatResponse(
+                    response=(
+                        f"Disculpá, no pude completar el agendamiento. "
+                        f"Si querés, escribime con todos los datos juntos: "
+                        f"nombre, día, horario y el número de propiedad. "
+                        f"También podés llamarnos al +54 9 3755 123456. "
+                        f"¿Necesitás algo más mientras tanto?"
+                    ),
+                    tools_called=["schedule_visit"],
+                    confidence=0.5,
+                ),
+                ["schedule_visit"], 0.5, "pre-llm::scheduling-escape",
+            )
         
         if missing:
-            progress_parts = []
-            if belief.selected_property_id:
-                progress_parts.append(f"propiedad #{belief.selected_property_id}")
-            if belief.scheduling_name:
-                progress_parts.append(belief.scheduling_name)
-            if belief.scheduling_day:
-                progress_parts.append(belief.scheduling_day)
-            if belief.scheduling_time:
-                progress_parts.append(belief.scheduling_time)
-            
-            progress = f"Datos confirmados: {', '.join(progress_parts)}. " if progress_parts else ""
-            response_text = f"{progress}Falta: {missing[0]}."
+            # Natural language progress messages
+            if len(missing) >= 3:
+                # Many fields missing
+                if "nombre" in missing and "día" in missing:
+                    response_text = (
+                        f"¡Dale! Para agendar la visita necesito algunos datos. "
+                        f"¿Me decís tu nombre y qué día te queda cómodo?"
+                    )
+                else:
+                    response_text = f"Genial. Para coordinar la visita necesito: {', '.join(missing)}. ¿Me los pasás?"
+            elif "nombre" in missing:
+                response_text = f"¡Perfecto! ¿Me decís tu nombre completo para agendar la visita?"
+            elif "día" in missing:
+                name_ref = f" {belief.scheduling_name}" if belief.scheduling_name else ""
+                response_text = f"Gracias{name_ref}. ¿Qué día te queda cómodo para la visita?"
+            elif "horario" in missing:
+                response_text = f"¿A qué horario preferís? (mañana, tarde, o una hora específica)"
+            elif "el ID de la propiedad" in missing:
+                response_text = "¿Qué propiedad querés visitar? Decime el número que aparece entre corchetes."
+            else:
+                response_text = f"Falta: {missing[0]}. ¿Me lo decís?"
             
             belief.last_tool_called = "schedule_visit"
             return (
@@ -174,6 +252,7 @@ async def _try_pre_llm_shortcut(
             horario=belief.scheduling_time,
         )
         belief.last_tool_called = "schedule_visit"
+        _clear_scheduling_state(belief)  # Reset for next interaction
         return (
             ChatResponse(
                 response=result_text,
@@ -250,6 +329,34 @@ async def route_message(
         belief.last_tool_called = pattern.name
 
         if not pattern.needs_llm:
+            # If greeting matched but message contains search keywords, delegate to S2
+            if pattern.name.startswith("greeting"):
+                search_kw = r"\b(busco|quiero|necesito|buscando|estoy buscando|me interesa|alquilar|alquiler|venta|comprar|departamento|depto|casa|ph|terreno)\b"
+                msg_lower = message.lower().strip()
+                if re.search(search_kw, msg_lower):
+                    # Override context: tell LLM to process the full request, not just greet
+                    override_context = (
+                        "⚠️ El usuario combinó un saludo con una consulta de propiedades. "
+                        "Ya lo saludaste — AHORA respondé a su consulta de búsqueda. "
+                        "Si el usuario no especificó alquiler o venta, mostrale TODAS las propiedades "
+                        "disponibles (tanto en alquiler como en venta). NO preguntes alquiler/compra "
+                        "a menos que sea ambiguo — si dice 'departamento disponible', buscá todo.\n\n"
+                    )
+                    full_context = override_context + (context_prompt or "")
+                    multistep_result = await process_message_multistep(message, session_id, full_context)
+                    s2_result = multistep_result
+                    latency = (time.perf_counter() - t0) * 1000
+                    _update_belief_from_result(belief, s2_result)
+                    await save_working_memory(belief)
+                    return (
+                        ChatResponse(
+                            response=s2_result.response,
+                            tools_called=s2_result.tools_called,
+                            confidence=max(pattern.confidence, s2_result.confidence),
+                            messages=s2_result.messages,
+                        ),
+                        belief, "s1→search", round(latency, 2),
+                    )
             response_text = format_response(pattern, message)
             latency = (time.perf_counter() - t0) * 1000
 
@@ -304,6 +411,15 @@ def _update_belief_from_result(belief: ConversationBeliefState, result: AgentRes
     import re
     if result.tools_called:
         belief.last_tool_called = result.tools_called[-1]
+        
+        # Extract selected_property_id from ALL tool calls
+        for tr in result.raw_tool_results:
+            args = tr.get("arguments", {})
+            pid = args.get("property_id")
+            if pid and isinstance(pid, (int, float)) and int(pid) > 0:
+                belief.selected_property_id = int(pid)
+                break  # First property_id found wins
+        
         if "search_properties" in result.tools_called:
             for tr in result.raw_tool_results:
                 if tr.get("name") == "search_properties":
@@ -342,6 +458,8 @@ def _update_belief_from_result(belief: ConversationBeliefState, result: AgentRes
                         belief.last_search_context = " | ".join(summaries)
 
         if "get_property_details" in result.tools_called:
+            # Track that we showed details for this property (to avoid redundant re-show)
+            belief.last_shown_detail_id = belief.selected_property_id
             # Extract property summary from the raw tool result for context injection
             for tr in result.raw_tool_results:
                 if tr.get("name") == "get_property_details":
@@ -353,3 +471,12 @@ def _update_belief_from_result(belief: ConversationBeliefState, result: AgentRes
                     )][:5]
                     if key_lines:
                         belief.last_property_data = " | ".join(key_lines)[:300]
+
+        if "schedule_visit" in result.tools_called:
+            # Extract property ID from the response if not already set
+            # LLM often says "la propiedad [7]" in scheduling context
+            if not belief.selected_property_id:
+                response_text = result.response.lower()
+                prop_m = re.search(r"propiedad\s*(?:#|n[úu]mero|nro)?\s*\[?(\d+)\]?", response_text)
+                if prop_m:
+                    belief.selected_property_id = int(prop_m.group(1))

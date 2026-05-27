@@ -33,6 +33,7 @@ class ConversationBeliefState:
     last_search_ids: list[int] = field(default_factory=list)  # IDs from last search
     last_search_context: str = ""  # "[1] Depto Centro | [2] Casa Schuster" — for LLM ref resolution
     last_property_data: str = ""  # Summary of last viewed property for context injection
+    last_shown_detail_id: int | None = None  # Last property ID shown via get_property_details
 
     # ── Confirmation tracking ──────────────────────────────────
     pending_offer: Optional[str] = None  # e.g., "te paso la dirección del monoambiente"
@@ -42,6 +43,7 @@ class ConversationBeliefState:
     scheduling_phone: str = ""
     scheduling_day: str = ""
     scheduling_time: str = ""
+    scheduling_loop_count: int = 0  # Track repeated asks of same missing field
 
     turn_count: int = 0
     history: list[str] = field(default_factory=list)  # last N user messages

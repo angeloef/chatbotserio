@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     ENVIRONMENT: str = "development"
     LOG_LEVEL: str = "DEBUG"
     APP_NAME: str = "ChatbotSerio"
+    INMOBILIARIA_NAME: str = "Inmobiliaria Oberá"
 
     # Database
     DATABASE_URL: str = "postgresql+asyncpg://chatbotserio:chatbotserio@localhost:5432/chatbotserio"

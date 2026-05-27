@@ -27,8 +27,8 @@ Herramientas disponibles:
 
 Reglas:
 1. Para saludos como "hola", "buenos días", respondé con un saludo amable y breve de no más de 15 palabras. NO enumeres tus capacidades, solo saludá y preguntá en qué podés ayudar.
-2. REGLA CRÍTICA: NUNCA busques propiedades si el usuario NO especificó si quiere ALQUILAR o COMPRAR. Si el usuario dice "busco departamento" sin decir "alquiler" o "venta", PRIMERO preguntale: "¿Buscás para alquilar o comprar?". NO asumas. NO busques sin operación.
-3. Para búsquedas donde el usuario SÍ especificó operación, usa search_properties con los filtros del mensaje.
+2. Si el usuario busca propiedades pero no especificó operación (alquiler/venta), preguntá UNA SOLA VEZ. Si el [CONTEXTO DE LA CONVERSACIÓN] ya muestra que la operación está definida (o el usuario ya la dijo en mensajes anteriores aunque con errores de tipeo), NO vuelvas a preguntar — procedé a buscar.
+3. Para búsquedas, usá search_properties con los filtros del mensaje y los criterios acumulados del contexto. Si tenés al menos 2 criterios (operación + tipo), buscá YA sin pedir más aclaraciones.
 4. NUNCA vuelvas a buscar si el usuario pregunta sobre resultados YA mostrados ("cuál es el más barato", "cuál tiene más ambientes"). Respondé con lo que ya sabés.
 5. Si el usuario confirma un ofrecimiento ("si porfavor", "dale, mostrame"), ejecutá la acción ofrecida sin volver a buscar.
 6. REGLA DE PROACTIVIDAD: Cuando el usuario muestre interés en una propiedad específica (por ID, tipo o descripción como "el monoambiente", "el de 1 dormitorio", "la primera"), usá get_property_details INMEDIATAMENTE sin pedir confirmación. NO preguntes "¿querés que te muestre los detalles?" ni "¿te paso las fotos?" — si el usuario dijo "me interesa X", eso ya es suficiente señal. Mostrá los detalles directamente.
@@ -104,7 +104,7 @@ async def process_message(
 
             tools_called.append(parsed.name)
             result = await execute_tool(parsed)
-            tool_results.append({"name": parsed.name, "result": result})
+            tool_results.append({"name": parsed.name, "result": result, "arguments": parsed.arguments})
 
             messages.append({
                 "role": "assistant",
@@ -214,6 +214,7 @@ async def process_message_multistep(
     # Multistep path: 2+ tool calls
     chunks: list[MessageChunk] = []
     tools_called: list[str] = []
+    tool_results: list[dict] = []
     prev_tool = ""
 
     for tc in choice.tool_calls:
@@ -231,6 +232,7 @@ async def process_message_multistep(
 
         tools_called.append(parsed.name)
         result = await execute_tool(parsed)
+        tool_results.append({"name": parsed.name, "result": result, "arguments": parsed.arguments})
 
         formatted = _format_tool_result_for_user(parsed.name, str(result), prev_tool)
         prev_tool = parsed.name
@@ -281,6 +283,7 @@ async def process_message_multistep(
     return AgentResponse(
         response=escalated_text,
         tools_called=tools_called,
+        raw_tool_results=tool_results,
         messages=chunks,
         confidence=confidence,
     )
@@ -345,7 +348,7 @@ async def process_message_with_specialist(
 
             tools_called.append(parsed.name)
             result = await execute_tool(parsed)
-            tool_results.append({"name": parsed.name, "result": result})
+            tool_results.append({"name": parsed.name, "result": result, "arguments": parsed.arguments})
 
             messages.append({
                 "role": "assistant", "content": None,

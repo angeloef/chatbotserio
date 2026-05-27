@@ -7,6 +7,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Optional
 
+from app.core.config import settings
+
 
 @dataclass
 class RoutePattern:
@@ -29,19 +31,19 @@ PATTERNS: list[RoutePattern] = [
         name="greeting_hola",
         pattern=r"^(hola|holis+|hola+|buen[ao]s+)\b.*$",
         confidence=0.99,
-        response="¡Hola! ¿En qué puedo ayudarte?",
+        response=f"¡Hola! Te comunicaste con {settings.INMOBILIARIA_NAME}. ¿En qué puedo ayudarte?",
     ),
     RoutePattern(
         name="greeting_formal",
         pattern=r"^(buenos días|buenas tardes|buenas noches)\b",
         confidence=0.99,
-        response="¡{0}! ¿En qué te puedo ayudar?",
+        response=f"¡{{0}}! Te comunicaste con {settings.INMOBILIARIA_NAME}. ¿En qué puedo ayudarte?",
     ),
     RoutePattern(
         name="greeting_como_estas",
         pattern=r"^(cómo|como) (estás|estas|andas|andás|va|vamos)\b",
         confidence=0.98,
-        response="¡Muy bien, gracias! ¿En qué te puedo ayudar con propiedades en Oberá?",
+        response=f"¡Muy bien, gracias! Soy el asistente de {settings.INMOBILIARIA_NAME}. ¿En qué puedo ayudarte con propiedades en Oberá?",
     ),
     # ── CONFIRMATIONS (static S1) ─────────────────────────────────
     RoutePattern(

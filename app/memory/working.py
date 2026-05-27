@@ -72,11 +72,13 @@ def _serialize_belief(belief: ConversationBeliefState) -> str:
         "last_search_ids": belief.last_search_ids,
         "last_search_context": belief.last_search_context,
         "last_property_data": belief.last_property_data,
+        "last_shown_detail_id": belief.last_shown_detail_id,
         "pending_offer": belief.pending_offer,
         "scheduling_name": belief.scheduling_name,
         "scheduling_phone": belief.scheduling_phone,
         "scheduling_day": belief.scheduling_day,
         "scheduling_time": belief.scheduling_time,
+        "scheduling_loop_count": belief.scheduling_loop_count,
         "turn_count": belief.turn_count,
         "history": belief.history[-5:],  # last 5 messages
     })
@@ -101,11 +103,13 @@ def _deserialize_belief(data: str | bytes, session_id: str) -> ConversationBelie
         last_search_ids=d.get("last_search_ids", []),
         last_search_context=d.get("last_search_context", ""),
         last_property_data=d.get("last_property_data", ""),
+        last_shown_detail_id=d.get("last_shown_detail_id"),
         pending_offer=d.get("pending_offer"),
         scheduling_name=d.get("scheduling_name", ""),
         scheduling_phone=d.get("scheduling_phone", ""),
         scheduling_day=d.get("scheduling_day", ""),
         scheduling_time=d.get("scheduling_time", ""),
+        scheduling_loop_count=d.get("scheduling_loop_count", 0),
         turn_count=d.get("turn_count", 0),
         history=d.get("history", []),
     )

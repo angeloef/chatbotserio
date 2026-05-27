@@ -10,16 +10,18 @@ from app.core.belief_state import ConversationBeliefState
 def detect_clarification_loop(belief: ConversationBeliefState) -> str | None:
     """Detect if we're stuck in a clarification loop (re-asking same questions).
     Returns a forceful instruction string if a loop is detected, None otherwise."""
-    if belief.turn_count < 4:
+    if belief.turn_count < 3:
         return None
-    # Check last 4 user messages for oscillation pattern
-    if len(belief.history) >= 4:
-        recent = [m.lower().strip() for m in belief.history[-4:]]
-        # Pattern: alquilar → departamento → alquilar → departamento
+    # Check last 3+ user messages for oscillation pattern
+    if len(belief.history) >= 3:
+        recent = [m.lower().strip() for m in belief.history[-3:]]
         ops = {'alquilar', 'alquiler', 'venta', 'comprar', 'compra'}
-        types = {'departamento', 'depto', 'casa', 'ph', 'terreno'}
+        types = {'departamento', 'depto', 'depa', 'casa', 'ph', 'terreno', 'monoambiente'}
+        clarifying = {'alquilar o comprar', 'alquiler o venta', 'departamento o casa', 'alquilar o compra',
+                      'alquilo o compro', 'buscas para alquilar', 'alquilar o comprar?'}
         
-        is_oscillating = True
+        # Pattern 1: Oscillation (op → type → op → type ...)
+        is_oscillating = len(recent) >= 3
         for i, msg in enumerate(recent):
             if i % 2 == 0:
                 if not any(op in msg for op in ops):
@@ -30,7 +32,13 @@ def detect_clarification_loop(belief: ConversationBeliefState) -> str | None:
                     is_oscillating = False
                     break
         
-        if is_oscillating:
+        # Pattern 2: Repetition — user keeps sending single-word clarifications
+        is_repeating = all(len(msg.split()) <= 2 for msg in recent) and len(set(recent)) <= 2
+        
+        # Pattern 3: Repeated clarification questions in the last prompt
+        is_clarify_loop = any(kw in (''.join(recent[-2:]) if len(recent) >= 2 else '') for kw in clarifying)
+        
+        if is_oscillating or is_repeating or is_clarify_loop:
             # Build what we know
             parts = []
             if belief.operation:
@@ -115,6 +123,12 @@ def build_context_prompt(belief: ConversationBeliefState) -> str:
                 f"{belief.last_property_data}. "
                 "Si el usuario pregunta por costos, servicios, dirección o características, "
                 "usá ESTOS datos. NO llames a get_faq_answer para preguntas sobre esta propiedad específica."
+            )
+        if belief.last_shown_detail_id == belief.selected_property_id:
+            parts.append(
+                "⚠️ NO REPITAS: Ya le mostraste los detalles completos de esta propiedad en el turno anterior. "
+                "Si el usuario dice 'dale', 'me interesa', 'ok' o confirma, NO vuelvas a mostrar los detalles — "
+                "preguntale si quiere coordinar una visita, ver fotos, o pasar al siguiente paso."
             )
 
     # Cost question override

@@ -41,7 +41,7 @@ BEDROOMS_PATTERN = re.compile(
 # ── Scheduling data extractors ─────────────────────────────────
 
 NAME_PATTERN = re.compile(
-    r"\b(?:me llamo|mi nombre es|soy|me dicen)\s+([A-Za-záéíóúüñÁÉÍÓÚÜÑ\s]+?)(?:\s+(?:y|puedo|quiero|mañana)|[,.]|$)",
+    r"\b(?:me llamo|mi nombre es|soy|me dicen)\s+([A-Za-záéíóúüñÁÉÍÓÚÜÑ\s]+?)(?:\s*[,.]?\s*(?:y|puedo|quiero|quisiera|me|mañana|tarde|\d)|[,.]|$)",
     re.IGNORECASE,
 )
 
@@ -121,10 +121,11 @@ def _fuzzy_normalize(text: str) -> str:
     - Transposed letters: aql -> alq ("aqluilar" -> "alquilar")
     - Common letter swaps: "alqruilar" -> "alquilar"
     - Specific known typos: "departamneto" -> "departamento"
+    - Standalone misspelled operations: "aqluirar" -> "alquilar"
     """
     # Fix merged "para" + operation: "paraalquilar" -> "para alquilar"
     text = re.sub(
-        r"\bpara(alquilar|alquiler|alqilar|aqluilar|alqruilar|aqluirar|alquirlar)\b",
+        r"\bpara(alquilar|alquiler|alqilar|aqluilar|alqruilar|aqluirar|alquirlar|alqruiler|alqruirar|alqilar)\b",
         r"para \1",
         text,
     )
@@ -145,8 +146,20 @@ def _fuzzy_normalize(text: str) -> str:
     text = re.sub(r"alquirar", "alquilar", text)
     text = re.sub(r"alquirer", "alquiler", text)
 
+    # Fix standalone misspellings (without "para" prefix)
+    # "alqruilar" alone -> "alquilar", "alqular" -> "alquilar"
+    text = re.sub(r"\balq([ru])*uilar\b", "alquilar", text)
+    text = re.sub(r"\balq([ru])*uiler\b", "alquiler", text)
+    
+    # Fix "alqilar" -> "alquilar" (missing 'u')
+    text = re.sub(r"\balqilar\b", "alquilar", text)
+    text = re.sub(r"\balqiler\b", "alquiler", text)
+
     # Fix specific known typo: "departamneto" -> "departamento"
     text = text.replace("departamneto", "departamento")
+
+    # Fix "departamento" typo: missing second 'a' 
+    text = re.sub(r"\bdepartam[e]n?to\b", "departamento", text)
 
     # Fix common "alq*" misspellings at word boundaries
     text = re.sub(r"\balq([ui][li]er)\b", r"alquiler", text)
@@ -249,19 +262,23 @@ def update_belief(belief: ConversationBeliefState, message: str) -> Conversation
 
     # ── Resolve descriptive references to property IDs ────────────
     if belief.last_search_context and belief.last_search_ids:
-        # Try to find which property the user is describing by matching
-        # keywords from the message against the search context summaries
-        desc_keywords = ["estudiante", "econ", "balc", "centr", "monoambiente", "dormitorio"]
+        # Only resolve if user is NOT asking for something different
+        desc_keywords = ["estudiante", "econ", "balc", "centr", "monoambiente", "dormitorio", "compartida", "c[ée]ntrico"]
         msg_lower = text.lower()
-        matching_ids = []
-        for kw in desc_keywords:
-            if kw in msg_lower:
-                for pid, summary in zip(belief.last_search_ids, belief.last_search_context.split(" | ")):
-                    if kw in summary.lower():
-                        matching_ids.append(pid)
-        if matching_ids:
-            belief.selected_property_id = matching_ids[0]
-            belief.active_intents.add("resolved_by_description")
+        # Skip resolution if user is asking for new/different properties
+        new_search_kw = ["alguno", "algun", "otro", "otra", "diferente", "de 1", "de 2", "buscando"]
+        if any(kw in msg_lower for kw in new_search_kw):
+            pass  # Don't resolve — user wants something different
+        else:
+            matching_ids = []
+            for kw in desc_keywords:
+                if kw in msg_lower:
+                    for pid, summary in zip(belief.last_search_ids, belief.last_search_context.split(" | ")):
+                        if kw in summary.lower():
+                            matching_ids.append(pid)
+            if matching_ids:
+                belief.selected_property_id = matching_ids[0]
+                belief.active_intents.add("resolved_by_description")
 
     # Extract selected property ID from patterns like "el 3", "depto 5", "ID 7"
     id_match = re.search(r"\b(?:id|nro|número|nº|numero|el|la|propiedad)\s*#?\s*(\d+)\b", fuzzy_text)
